@@ -1,0 +1,4 @@
+include README.md
+recursive-include src/lmc/examples *.lmc
+recursive-include tests *.py
+include lmc-ide.pyw lmcc-run.py

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmc-toolchain"
+version = "0.2.0"
+description = "Compiler and IDE for LMC (Little Man Computer) that builds bare metal images for the Raspberry Pi 3B"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["lmc", "little man computer", "compiler", "aarch64", "raspberry pi", "bare metal"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Compilers",
+    "Intended Audience :: Education",
+]
+
+[project.scripts]
+lmcc = "lmc.compiler:main"
+
+[project.gui-scripts]
+lmc-ide = "lmc.ide:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lmc = ["examples/*.lmc"]

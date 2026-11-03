@@ -1,0 +1,12 @@
+; Reads two numbers, prints their sum.
+main:
+        inp
+        sta 98
+        inp
+        sta 97
+        lda 98
+        add 97
+        bra end
+end:
+        out
+        hlt

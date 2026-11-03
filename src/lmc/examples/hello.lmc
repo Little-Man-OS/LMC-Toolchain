@@ -1,0 +1,20 @@
+; Prints a message, then counts down from 5.
+msg:    CHA "Hello from LMC on bare metal!\n"
+count:  DAT 5
+
+main:
+        otc msg
+loop:
+        lda count
+        brz done
+        out
+        sub #1
+        sta count
+        bra loop
+done:
+        otc #'D'
+        otc #'o'
+        otc #'n'
+        otc #'e'
+        otc #10
+        hlt

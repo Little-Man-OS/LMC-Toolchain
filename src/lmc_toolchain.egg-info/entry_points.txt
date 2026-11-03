@@ -1,0 +1,5 @@
+[console_scripts]
+lmcc = lmc.compiler:main
+
+[gui_scripts]
+lmc-ide = lmc.ide:main
