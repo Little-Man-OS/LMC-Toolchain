@@ -16,9 +16,12 @@ Usage:
     lmcc prog.lmc --run           build, then run in QEMU
     lmcc --examples               copy the example programs to ./lmc-examples
 
-IMP files are looked for next to the file that imports them, then in any -I folders.
+IMP files are looked for next to the file that imports them, then in any -I folders, in the
+folders listed in the LMC_INCLUDE environment variable, and in the project folder (the nearest
+folder above the source that holds a .lmcproject file). The IDE's terminal sets LMC_INCLUDE.
 
-See README.md for the language reference.
+The commands are those of Peter Higginson's LMC (HLT or COB, ADD, SUB, STA or STO, LDA, BRA,
+BRZ, BRP, INP, OUT, OTC, DAT), plus IMP. See README.md for the language reference.
 """
 import argparse
 import os
@@ -38,10 +41,12 @@ STACK_TOP = 0x80000          # stack grows down from here, below the image
 AUX_BASE = 0x3F215000        # mini UART block
 GPIO_BASE = 0x3F200000
 MASK64 = (1 << 64) - 1
-MAX_SLOT = 0xFFFF
+MAX_ADDR = (1 << 48) - 1
 
-MNEMONICS = {"HLT", "ADD", "SUB", "STA", "LDA", "BRA", "BRZ", "BRP",
+# the commands of Peter Higginson's LMC, plus IMP. STO and COB are his alternative names.
+MNEMONICS = {"HLT", "COB", "ADD", "SUB", "STA", "STO", "LDA", "BRA", "BRZ", "BRP",
              "INP", "OUT", "OTC", "IMP"}
+ALIASES = {"STO": "STA", "COB": "HLT"}
 DATA_KW = {"DAT", "INT", "CHA", "FLO", "DUB"}
 DATA_ALIGN = {"DAT": 8, "INT": 4, "CHA": 1, "FLO": 4, "DUB": 8}
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*")
@@ -221,6 +226,16 @@ class Asm:
 
     def store(self, rt, kind, off):
         self.data_access(STORE_FORMS, rt, kind, off)
+
+    def load_abs(self, rt, addr):
+        """Load 8 bytes from a real memory address."""
+        self.mov_imm(2, addr)
+        self.raw(enc_ldst(0xF9400000, rt, 2, 0), f"ldr x{rt}, [x2]")
+
+    def store_abs(self, rt, addr):
+        """Store 8 bytes to a real memory address."""
+        self.mov_imm(2, addr)
+        self.raw(enc_ldst(0xF9000000, rt, 2, 0), f"str x{rt}, [x2]")
 
     def ldr_w(self, rt, rn, off):
         self.raw(enc_ldst(0xB9400000, rt, rn, off >> 2), f"ldr w{rt}, [x{rn}, #{off}]")
@@ -568,9 +583,12 @@ def parse_operand(tok, loc):
         return ("imm", parse_int(tok[1:], loc))
     if re.fullmatch(r"\d+|0[xX][0-9a-fA-F]+", tok):
         n = int(tok, 0)
-        if n > MAX_SLOT:
-            raise LmcError(f"slot number {n} is too large (maximum {MAX_SLOT})", loc)
-        return ("slot", n)
+        if n > MAX_ADDR:
+            raise LmcError(f"address {tok} is too large", loc)
+        if n % 8:
+            raise LmcError(f"address {tok} is not a multiple of 8, which 8 byte accesses need "
+                           f"(write #{tok} if you meant the number {tok})", loc)
+        return ("addr", n)
     if IDENT.fullmatch(tok):
         return ("sym", tok)
     raise LmcError(f"bad operand '{tok}'", loc)
@@ -587,7 +605,6 @@ class Program:
         self.decls = []
         self.code_labels = {}
         self.data_labels = {}
-        self.max_slot = -1
         self.imported = set()
         self.errors = []        # filled instead of raising when collect is True
         self.collect = False
@@ -679,9 +696,9 @@ def parse_file(path, prog, importer_loc=None):
             if not IDENT.fullmatch(name):
                 raise LmcError(f"bad label name '{name}'", loc)
             labels.append((name, loc))
-        # classic LMC style: "name DAT 5" with no colon
+        # classic LMC style, a label with no colon: "loop LDA count" or "count DAT 5"
         if len(toks) >= 2 and toks[0].upper() not in MNEMONICS | DATA_KW \
-                and toks[1].upper() in DATA_KW:
+                and toks[1].upper() in MNEMONICS | DATA_KW:
             name = toks.pop(0)
             if not IDENT.fullmatch(name):
                 raise LmcError(f"bad label name '{name}'", loc)
@@ -691,7 +708,7 @@ def parse_file(path, prog, importer_loc=None):
             return
         labels = pending + labels
         pending = []
-        head = toks[0].upper()
+        head = ALIASES.get(toks[0].upper(), toks[0].upper())
 
         if head in DATA_KW:
             try:
@@ -747,8 +764,6 @@ def parse_file(path, prog, importer_loc=None):
                 raise LmcError(f"{head} needs a label to branch to", loc)
             if head == "STA" and operand[0] == "imm":
                 raise LmcError("STA cannot store into an immediate value", loc)
-        if operand and operand[0] == "slot":
-            prog.max_slot = max(prog.max_slot, operand[1])
         prog.ir.append(("ins", head, operand, loc))
 
     for n, raw in enumerate(lines, 1):
@@ -781,8 +796,6 @@ class Sym:
 
 def layout_data(prog):
     data = bytearray()
-    if prog.max_slot >= 0:
-        data.extend(bytes((prog.max_slot + 1) * 8))
     syms = {}
     for d in prog.decls:
         align = DATA_ALIGN[d.kind]
@@ -811,8 +824,8 @@ def generate(prog, require_main=True):
         kind, val = op
         if kind == "imm":
             return ("imm", val)
-        if kind == "slot":
-            return ("mem", "DAT", val * 8, 1)
+        if kind == "addr":
+            return ("abs", val)
         if val in syms:
             s = syms[val]
             if s.kind in ("FLO", "DUB"):
@@ -827,6 +840,8 @@ def generate(prog, require_main=True):
         acc = access(op, loc)
         if acc[0] == "imm":
             a.mov_imm(reg, acc[1])
+        elif acc[0] == "abs":
+            a.load_abs(reg, acc[1])
         else:
             a.load(reg, acc[1], acc[2])
 
@@ -851,7 +866,10 @@ def generate(prog, require_main=True):
             load_to(0, op, loc)
         elif m == "STA":
             acc = access(op, loc)
-            a.store(0, acc[1], acc[2])
+            if acc[0] == "abs":
+                a.store_abs(0, acc[1])
+            else:
+                a.store(0, acc[1], acc[2])
         elif m in ("ADD", "SUB"):
             load_to(1, op, loc)
             (a.add_reg if m == "ADD" else a.sub_reg)(0, 0, 1)
@@ -984,6 +1002,29 @@ def compile_file(path, overrides=None, include_dirs=()):
     return result
 
 
+def project_include_dirs(source, given=()):
+    """Folders searched by IMP besides the importing file's own: -I folders, $LMC_INCLUDE, and the
+    nearest folder above the source file that holds a .lmcproject file (the IDE's project root)."""
+    dirs = list(given)
+    dirs += [d for d in os.environ.get("LMC_INCLUDE", "").split(os.pathsep) if d]
+    here = os.path.dirname(os.path.abspath(source))
+    while True:
+        if os.path.isfile(os.path.join(here, ".lmcproject")):
+            dirs.append(here)
+            break
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    seen, out = set(), []
+    for d in dirs:
+        full = os.path.abspath(d)
+        if full not in seen:
+            seen.add(full)
+            out.append(full)
+    return out
+
+
 def sort_errors(errors):
     return sorted(errors, key=lambda e: (e.loc is None, getattr(e.loc, "full", ""),
                                          getattr(e.loc, "line", 0)))
@@ -1021,7 +1062,7 @@ def main(argv=None):
         ap.error("give the .lmc file to compile, or use --examples")
 
     try:
-        a, code, data = compile_file(args.source, include_dirs=args.include_dirs)
+        a, code, data = compile_file(args.source, include_dirs=project_include_dirs(args.source, args.include_dirs))
     except CompileFailed as failure:
         for e in failure.errors:
             print(e, file=sys.stderr)

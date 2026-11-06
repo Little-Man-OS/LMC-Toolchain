@@ -3,14 +3,15 @@ README.md
 lmc-ide.pyw
 lmcc-run.py
 pyproject.toml
-setup.cfg
 src/lmc/__init__.py
 src/lmc/__main__.py
 src/lmc/compiler.py
 src/lmc/gui.py
 src/lmc/ide.py
+src/lmc/terminal.py
 src/lmc/examples/add.lmc
 src/lmc/examples/hello.lmc
+src/lmc/examples/higginson.lmc
 src/lmc_toolchain.egg-info/PKG-INFO
 src/lmc_toolchain.egg-info/SOURCES.txt
 src/lmc_toolchain.egg-info/dependency_links.txt
@@ -18,3 +19,4 @@ src/lmc_toolchain.egg-info/entry_points.txt
 src/lmc_toolchain.egg-info/top_level.txt
 tests/test_compiler.py
 tests/test_gui.py
+tests/test_terminal.py

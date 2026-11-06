@@ -25,9 +25,11 @@ import traceback
 
 try:
     from . import compiler as lmcc
+    from . import terminal
 except ImportError:          # run as a plain script, not as part of the package
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from lmc import compiler as lmcc
+    from lmc import terminal
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".lmc_ide.json")
 LOG_PATH = os.path.join(os.path.expanduser("~"), ".lmc_ide_error.log")
@@ -45,33 +47,36 @@ TEMPLATE = "; new LMC program\nmain:\n        hlt\n"
 
 HELP_TEXT = """LMC quick reference
 
-Instructions
-  HLT            stop
+Commands (the same as Peter Higginson's LMC, plus IMP)
+  HLT or COB     stop
   LDA x          accumulator = x
-  STA x          x = accumulator
+  STA x or STO x x = accumulator
   ADD x / SUB x  add or subtract x
   BRA label      branch always
   BRZ label      branch if the accumulator is zero
   BRP label      branch if zero or positive
   INP            read a number from the serial console
-  OUT [x]        print a number (the accumulator if no operand)
-  OTC [x]        print a character or a CHA string
+  OUT            print the accumulator as a number
+  OTC            print the accumulator as a character
+  DAT [value]    reserve a named memory location
   IMP "file"     include another .lmc file
 
+Labels can have a colon (loop:) or not (loop LDA count). The program
+starts at the label  main  and comments start with ; or //
+
 Operands
-  42             slot 42 (an 8 byte cell)
-  name           a data label
-  #5  #0x10  #'A'   an immediate value (not for STA)
+  name           a named memory location (a DAT)
+  42  0x3F00     a real memory address (a multiple of 8, not a mailbox)
+  #5  #0x10  #'A'   an immediate value, the number itself (not for STA)
 
-Data (name: TYPE value, or the classic  name TYPE value)
-  DAT 8 bytes   INT 4 bytes   CHA 1 byte or "string"   FLO   DUB
-
-The program starts at the label  main:
-Comments start with ; or //
+Extras
+  OUT x / OTC x  print a location or a CHA string without loading it first
+  INT 4 bytes   CHA 1 byte or "string"   FLO   DUB   as well as DAT (8 bytes)
 
 Keys
   F5 build    F6 build and run    Shift+F6 stop    F8 machine code listing
   Ctrl+N/O/S/W new, open, save, close    Ctrl+F find    F3 find next    Ctrl+G go to line
+  Ctrl+B project panel    Ctrl+` terminal
 """
 
 TAGS = ["comment", "mnemonic", "datatype", "label_def", "label_ref", "number", "string"]
@@ -404,10 +409,11 @@ class Doc:
             elif up in lmcc.MNEMONICS:
                 mark("mnemonic", toks[j])
                 j += 1
-            elif j + 1 < len(toks) and toks[j + 1][2].upper() in lmcc.DATA_KW \
+            elif j + 1 < len(toks) and toks[j + 1][2].upper() in (lmcc.DATA_KW | lmcc.MNEMONICS) \
                     and lmcc.IDENT.fullmatch(toks[j][2]):
+                # a label with no colon, as in Peter Higginson's simulator: "loop LDA count"
                 mark("label_def", toks[j])
-                mark("datatype", toks[j + 1])
+                mark("datatype" if toks[j + 1][2].upper() in lmcc.DATA_KW else "mnemonic", toks[j + 1])
                 j += 2
             else:
                 continue
@@ -454,6 +460,9 @@ class IDE(tk.Tk):
         self.highlight_jobs = {}
         self.runner = Runner(self._emit)
         self.events = queue.Queue()
+        self.term = None
+        self.term_history = []
+        self.term_pos = 0
         self.last_find = ""
         self._style()
         self._build_ui()
@@ -480,6 +489,8 @@ class IDE(tk.Tk):
                     self.after_cancel(job)
                 except tk.TclError:
                     pass
+        if self.term:
+            self.term.kill()
         super().destroy()
 
     def report_callback_exception(self, exc, val, tb):
@@ -591,6 +602,34 @@ class IDE(tk.Tk):
         csb.pack(side="right", fill="y")
         self.bottom.add(cframe, text="Console")
 
+        tframe = ttk.Frame(self.bottom)
+        self.term_out = tk.Text(tframe, height=8, bg=T["bg"], fg=T["fg"], relief="flat",
+                                highlightthickness=0, font=self.font, state="disabled",
+                                padx=8, pady=4, wrap="char", insertbackground=T["fg"])
+        self.term_out.tag_configure("prompt", foreground=T["accent"])
+        self.term_out.tag_configure("info", foreground=T["info"])
+        tsb = ttk.Scrollbar(tframe, orient="vertical", command=self.term_out.yview)
+        self.term_out.configure(yscrollcommand=tsb.set)
+        trow = ttk.Frame(tframe)
+        self.term_prompt = ttk.Label(trow, text="$", style="Status.TLabel")
+        self.term_prompt.pack(side="left")
+        self.term_entry = ttk.Entry(trow, font=self.font)
+        self.term_entry.pack(side="left", fill="x", expand=True, padx=6, pady=3)
+        ttk.Button(trow, text="Stop", width=6, command=self.term_interrupt).pack(side="left", padx=(0, 4), pady=3)
+        ttk.Button(trow, text="Clear", width=6, command=self.term_clear).pack(side="left", padx=(0, 6), pady=3)
+        trow.pack(side="bottom", fill="x")
+        self.term_out.pack(side="left", fill="both", expand=True)
+        tsb.pack(side="right", fill="y")
+        self.bottom.add(tframe, text="Terminal")
+        e = self.term_entry
+        e.bind("<Return>", self._term_submit)
+        e.bind("<Up>", lambda ev: self._term_recall(-1))
+        e.bind("<Down>", lambda ev: self._term_recall(1))
+        e.bind("<Control-c>", self._term_ctrl_c)
+        e.bind("<Control-d>", lambda ev: (self._term_session().close_stdin(), "break")[1])
+        e.bind("<Control-l>", lambda ev: (self.term_clear(), "break")[1])
+        self.term_out.bind("<Button-1>", lambda ev: self.after_idle(self.term_entry.focus_set))
+
     def _menus(self):
         m = tk.Menu(self)
         opts = dict(tearoff=0, bg=T["panel"], fg=T["fg"], activebackground=T["select"],
@@ -618,7 +657,17 @@ class IDE(tk.Tk):
         v = tk.Menu(m, **opts)
         v.add_command(label="Show or hide the project panel", accelerator="Ctrl+B", command=self.toggle_sidebar)
         v.add_command(label="Refresh project panel", accelerator="F2", command=self.refresh_tree)
+        v.add_separator()
+        v.add_command(label="Show terminal", accelerator="Ctrl+`", command=self.show_terminal)
         m.add_cascade(label="View", menu=v)
+        tm = tk.Menu(m, **opts)
+        tm.add_command(label="Show terminal", accelerator="Ctrl+`", command=self.show_terminal)
+        tm.add_command(label="Stop the running command", accelerator="Ctrl+C", command=self.term_interrupt)
+        tm.add_command(label="Clear", accelerator="Ctrl+L", command=self.term_clear)
+        tm.add_separator()
+        tm.add_command(label="Choose shell...", command=self.choose_shell)
+        tm.add_command(label="Use the default shell", command=self.default_shell)
+        m.add_cascade(label="Terminal", menu=tm)
         b = tk.Menu(m, **opts)
         b.add_command(label="Build", accelerator="F5", command=self.build)
         b.add_command(label="Build and run in QEMU", accelerator="F6", command=self.run)
@@ -642,6 +691,7 @@ class IDE(tk.Tk):
             "<F6>": self.run, "<Shift-F6>": self.stop, "<F8>": self.show_listing,
             "<Control-q>": self.quit_app, "<Control-O>": self.open_folder_dialog,
             "<Control-b>": self.toggle_sidebar, "<F2>": self.refresh_tree,
+            "<Control-grave>": self.show_terminal,
         }
         for seq, fn in table.items():
             widget.bind(seq, lambda e, fn=fn: (fn(), "break")[1])
@@ -763,6 +813,8 @@ class IDE(tk.Tk):
             if not self.confirm_close(doc):
                 return
         self.runner.stop()
+        if self.term:
+            self.term.kill()
         self.destroy()
 
     def update_tab_title(self, doc):
@@ -1071,6 +1123,10 @@ class IDE(tk.Tk):
                     self._console_write(f"\n[{text}]\n", "info")
                     self.run_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
+                elif kind == "term":
+                    self._term_write(text)
+                elif kind == "termexit":
+                    self._term_finished(int(text))
         except queue.Empty:
             pass
         self._poll_job = self.after(50, self._poll_events)
@@ -1173,6 +1229,7 @@ class IDE(tk.Tk):
         self.update_main_label()
         self.schedule_check()
         self.set_status(f"Opened folder {path}")
+        self.term_set_cwd(path)
 
     def close_folder(self):
         if not self.root_dir:
@@ -1183,6 +1240,7 @@ class IDE(tk.Tk):
         save_config(self.cfg)
         self.title("LMC IDE")
         self.show_sidebar(False)
+        self._term_sync_project()
         for d in self.docs:
             self.maybe_adopt_main(d)
         self.update_main_label()
@@ -1406,6 +1464,141 @@ class IDE(tk.Tk):
         path = self._selected_path()
         if path and os.path.isfile(path):
             self.set_main(path)
+
+    # --- terminal -----------------------------------------------------------------------------------
+    def _term_session(self):
+        if self.term is None:
+            start = self.root_dir
+            if not start:
+                doc = self.current()
+                start = os.path.dirname(doc.path) if doc and doc.path else os.path.expanduser("~")
+            self.term = terminal.Session(
+                start, terminal.detect_shell(self.cfg),
+                on_output=lambda text: self._emit("term", text),
+                on_exit=lambda code: self._emit("termexit", str(code)))
+            self._term_write(f"{os.path.basename(self.term.shell)} in {self.term.cwd}\n", "info")
+            self._term_update_prompt()
+            self._term_sync_project()
+        return self.term
+
+    def _term_sync_project(self):
+        """Tell commands run in the terminal where the project is, so lmcc finds IMP files like the IDE does."""
+        if self.term is not None:
+            if self.root_dir:
+                self.term.extra_env["LMC_INCLUDE"] = self.root_dir
+            else:
+                self.term.extra_env.pop("LMC_INCLUDE", None)
+
+    def show_terminal(self):
+        self._term_session()
+        self.bottom.select(2)
+        self.term_entry.focus_set()
+
+    def term_set_cwd(self, path):
+        self._term_sync_project()
+        if self.term is not None and not self.term.running:
+            self.term.set_cwd(path)
+            self._term_write(f"folder: {path}\n", "info")
+            self._term_update_prompt()
+
+    def _term_short_cwd(self):
+        cwd = self.term.cwd
+        home = os.path.expanduser("~")
+        if self.root_dir and self._inside(cwd, self.root_dir):
+            rel = os.path.relpath(cwd, self.root_dir)
+            base = os.path.basename(self.root_dir) or self.root_dir
+            return base if rel == "." else f"{base}/{rel.replace(os.sep, '/')}"
+        if cwd == home:
+            return "~"
+        return os.path.basename(cwd) or cwd
+
+    def _term_update_prompt(self):
+        if self.term:
+            self.term_prompt.configure(text=f"{self._term_short_cwd()} $")
+
+    def _term_write(self, text, tag=None):
+        out = self.term_out
+        text = terminal.strip_ansi(text.replace("\r\n", "\n"))
+        out.configure(state="normal")
+        for i, part in enumerate(text.split("\r")):
+            if i > 0:                                  # a lone carriage return rewrites the line
+                out.delete("end-1c linestart", "end-1c")
+            out.insert("end", part, tag)
+        if int(out.index("end-1c").split(".")[0]) > 5000:
+            out.delete("1.0", "1000.0")
+        out.see("end")
+        out.configure(state="disabled")
+
+    def _term_submit(self, event=None):
+        session = self._term_session()
+        line = self.term_entry.get()
+        self.term_entry.delete(0, "end")
+        if session.running:                            # text typed while a program runs goes to it
+            self._term_write(line + "\n")
+            session.send(line)
+            return "break"
+        if self.term_out.get("end-2c", "end-1c") not in ("\n", ""):
+            self._term_write("\n")
+        self._term_write(f"{self._term_short_cwd()} $ ", "prompt")
+        self._term_write(line + "\n")
+        if line.strip():
+            if not self.term_history or self.term_history[-1] != line:
+                self.term_history.append(line)
+        self.term_pos = len(self.term_history)
+        if line.strip().lower() in ("clear", "cls"):
+            self.term_clear()
+            return "break"
+        session.run(line)
+        return "break"
+
+    def _term_finished(self, code):
+        if code not in (0,):
+            self._term_write(f"[exit {code}]\n", "info")
+        self._term_update_prompt()
+
+    def _term_recall(self, step):
+        if not self.term_history:
+            return "break"
+        self.term_pos = max(0, min(len(self.term_history), self.term_pos + step))
+        self.term_entry.delete(0, "end")
+        if self.term_pos < len(self.term_history):
+            self.term_entry.insert(0, self.term_history[self.term_pos])
+        return "break"
+
+    def _term_ctrl_c(self, event=None):
+        if self.term and self.term.running and not self.term_entry.selection_present():
+            self.term_interrupt()
+            return "break"
+        return None
+
+    def term_interrupt(self):
+        if self.term and self.term.running:
+            self.term.kill()
+            self._term_write("^C\n", "info")
+
+    def term_clear(self):
+        self.term_out.configure(state="normal")
+        self.term_out.delete("1.0", "end")
+        self.term_out.configure(state="disabled")
+
+    def choose_shell(self):
+        path = filedialog.askopenfilename(title="Choose a shell (for example bash.exe, cmd.exe or powershell.exe)")
+        if path:
+            self.cfg["shell"] = path
+            save_config(self.cfg)
+            self._apply_shell(path)
+
+    def default_shell(self):
+        self.cfg.pop("shell", None)
+        save_config(self.cfg)
+        self._apply_shell(terminal.detect_shell(self.cfg))
+
+    def _apply_shell(self, path):
+        session = self._term_session()
+        if session.running:
+            session.kill()
+        session.set_shell(path)
+        self._term_write(f"shell: {path}\n", "info")
 
     # --- extra windows -----------------------------------------------------------------------------
     def show_listing(self):

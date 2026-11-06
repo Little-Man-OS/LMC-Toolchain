@@ -125,6 +125,18 @@ class ProjectTests(unittest.TestCase):
             self.assertIsNone(self.app._ask_name("x"))
         err.assert_called_once()
 
+    def test_highlights_labels_without_colons(self):
+        doc = self.app.current()
+        doc.text.delete("1.0", "end")
+        doc.text.insert("1.0", "main LDA total\nloop: OUT\ntotal DAT 3\n")
+        doc.highlight()
+        def words(tag):
+            r = doc.text.tag_ranges(tag)
+            return [str(doc.text.get(r[i], r[i + 1])) for i in range(0, len(r), 2)]
+        self.assertEqual(words("label_def"), ["main", "loop:", "total"])
+        self.assertEqual(words("mnemonic"), ["LDA", "OUT"])
+        self.assertEqual(words("datatype"), ["DAT"])
+
     def test_close_folder_hides_panel(self):
         self.app.close_folder()
         self.assertFalse(self.app.sidebar_shown)
@@ -133,3 +145,90 @@ class ProjectTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAVE_DISPLAY and os.name != "nt", "needs Tk, a display and a POSIX shell")
+class TerminalTabTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self.tmp.name)
+        write(self.root, "main.lmc", "main:\n hlt\n")
+        write(self.root, "sub/x.txt", "hi\n")
+        self.home = tempfile.TemporaryDirectory()
+        patcher = mock.patch.object(gui, "CONFIG_PATH", os.path.join(self.home.name, "cfg.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.app = gui.IDE([], self.root)
+        self.addCleanup(self.app.destroy)
+        pump(self.app)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.home.cleanup()
+
+    def type(self, command, wait=1.0):
+        self.app.show_terminal()
+        self.app.term_entry.delete(0, "end")
+        self.app.term_entry.insert(0, command)
+        self.app._term_submit()
+        pump(self.app, wait)
+
+    def output(self):
+        return self.app.term_out.get("1.0", "end-1c")
+
+    def test_starts_in_project_folder_and_runs_commands(self):
+        self.type("pwd; ls")
+        self.assertIn(self.root, self.output())
+        self.assertIn("main.lmc", self.output())
+        self.assertIn("sub", self.output())
+
+    def test_cd_updates_prompt(self):
+        self.type("cd sub")
+        self.assertTrue(self.app.term_prompt.cget("text").endswith("/sub $"), self.app.term_prompt.cget("text"))
+        self.type("cat x.txt")
+        self.assertIn("hi", self.output())
+
+    def test_history_with_arrow_keys(self):
+        self.type("echo one")
+        self.type("echo two")
+        self.app._term_recall(-1)
+        self.assertEqual(self.app.term_entry.get(), "echo two")
+        self.app._term_recall(-1)
+        self.assertEqual(self.app.term_entry.get(), "echo one")
+        self.app._term_recall(1)
+        self.assertEqual(self.app.term_entry.get(), "echo two")
+
+    def test_stop_kills_a_long_command(self):
+        self.type("sleep 30", wait=0.5)
+        self.assertTrue(self.app.term.running)
+        self.app.term_interrupt()
+        pump(self.app, 1.0)
+        self.assertFalse(self.app.term.running)
+
+    def test_input_while_running_goes_to_the_program(self):
+        self.type("read n; echo hello:$n", wait=0.5)
+        self.app.term_entry.insert(0, "ellie")
+        self.app._term_submit()
+        pump(self.app, 1.0)
+        self.assertIn("hello:ellie", self.output())
+
+    def test_clear_and_exit_codes(self):
+        self.type("false")
+        self.assertIn("[exit 1]", self.output())
+        self.type("clear")
+        self.assertEqual(self.output().strip(), "")
+
+    def test_ansi_colours_are_removed(self):
+        self.type("printf '\\033[31mred\\033[0m\\n'")
+        self.assertIn("red", self.output())
+        self.assertNotIn("\x1b", self.output())
+
+    def test_terminal_knows_the_project_folder(self):
+        self.type("echo $LMC_INCLUDE")
+        self.assertIn(self.root, self.output())
+
+    def test_lmcc_runs_in_the_terminal(self):
+        import sys
+        parent = os.path.dirname(os.path.dirname(os.path.abspath(gui.__file__)))
+        self.type(f"PYTHONPATH='{parent}' '{sys.executable}' -m lmc main.lmc -o out.img", wait=2.0)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "out.img")), self.output())

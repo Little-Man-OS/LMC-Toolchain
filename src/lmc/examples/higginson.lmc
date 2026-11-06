@@ -1,0 +1,15 @@
+; The positive difference of two numbers, written the way Peter Higginson's
+; simulator takes it: labels with no colon, STO and COB.
+main    INP
+        STO first
+        INP
+        STO second
+        LDA first
+        SUB second
+        BRP show
+        LDA second
+        SUB first
+show    OUT
+        COB
+first   DAT
+second  DAT

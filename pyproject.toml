@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lmc-toolchain"
-version = "0.2.0"
+version = "0.4.0"
 description = "Compiler and IDE for LMC (Little Man Computer) that builds bare metal images for the Raspberry Pi 3B"
 readme = "README.md"
 requires-python = ">=3.9"

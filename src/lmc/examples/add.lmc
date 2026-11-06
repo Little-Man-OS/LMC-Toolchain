@@ -1,12 +1,11 @@
-; Reads two numbers, prints their sum.
-main:
-        inp
-        sta 98
-        inp
-        sta 97
-        lda 98
-        add 97
-        bra end
-end:
-        out
-        hlt
+; Reads two numbers and prints their sum.
+main    INP
+        STA first
+        INP
+        STA second
+        LDA first
+        ADD second
+        OUT
+        HLT
+first   DAT
+second  DAT

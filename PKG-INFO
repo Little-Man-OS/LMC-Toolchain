@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: lmc-toolchain
-Version: 0.2.0
+Version: 0.4.0
 Summary: Compiler and IDE for LMC (Little Man Computer) that builds bare metal images for the Raspberry Pi 3B
 Keywords: lmc,little man computer,compiler,aarch64,raspberry pi,bare metal
 Classifier: Programming Language :: Python :: 3
@@ -17,7 +17,7 @@ so there is no assembler or linker step. It has no dependencies beyond Python 3.
 
 ## Install
 
-    pip install lmc_toolchain-0.2.0-py3-none-any.whl
+    pip install lmc_toolchain-0.4.0-py3-none-any.whl
 
 or from the source folder, `pip install .` (use `pip install -e .` while you are changing it).
 That gives you two commands, `lmcc` for the compiler and `lmc-ide` for the IDE. It needs
@@ -30,6 +30,22 @@ your PATH, which is common on Windows. These always work instead:
 
     python -m lmc ide              open the IDE
     python -m lmc prog.lmc         run the compiler
+
+### MSYS2
+
+Use the Python from the same MSYS2 environment as your QEMU, which is usually the UCRT64 shell
+(or MINGW64). In that shell:
+
+    pip install --break-system-packages lmc_toolchain-0.4.0-py3-none-any.whl
+    python -m lmc ide
+
+`--break-system-packages` is only there because MSYS2 manages its Python with pacman, and this
+package just adds new files. If `python -c "import tkinter"` gives an error, install Tk with
+`pacman -S mingw-w64-ucrt-x86_64-tk` (drop `ucrt-` for the MINGW64 shell). Start the IDE from the
+MSYS2 shell so that it, the Run button and the Terminal tab all see MSYS2's PATH, which is how
+they find QEMU and bash.
+
+### Without installing
 
 You can also use it without installing anything. In the source folder, double click
 `lmc-ide.pyw` (or run `python lmc-ide.pyw`) for the IDE, and use `python lmcc-run.py prog.lmc`
@@ -62,6 +78,15 @@ If the IDE will not start, it prints the reason, and any crash is also written t
 - F5 builds `kernel8.img` in the project folder (next to the main file if no folder is open).
   F6 builds and runs it in QEMU, with the serial output in the Console tab and a box for typing
   input to the program (`INP`). Shift+F6 stops it.
+- A Terminal tab (Ctrl+` to open it). It starts in your project folder and runs whatever you type,
+  so `lmcc`, `git`, `make` and your own scripts all work, and the output streams in as it
+  arrives. Up and Down recall earlier commands, Stop or Ctrl+C ends a running command, and text
+  you type while a program runs is sent to it. The folder carries over between commands, so
+  `cd drivers && ls` leaves you in `drivers`, and the prompt shows where you are. Each command
+  runs in its own shell process, so things that live inside one shell, such as `export`
+  variables and aliases, do not carry over. The shell is bash if there is a real one on your
+  PATH (such as MSYS2's), otherwise cmd on Windows or `$SHELL` elsewhere. Terminal, then
+  "Choose shell..." picks another.
 - F8 shows the machine code listing. Ctrl+F finds, Ctrl+G goes to a line.
 
 The first time you press Run, the IDE asks where QEMU is if it is not on your PATH.
@@ -74,6 +99,11 @@ The first time you press Run, the IDE asks where QEMU is if it is not on your PA
     lmcc prog.lmc -I libs         also look for IMP files in the folder libs
     lmcc prog.lmc -l              print addresses, machine code and assembly
     lmcc prog.lmc --run           build and run in QEMU (Ctrl-A then X to quit)
+
+Imports are searched for next to the importing file, then in `-I` folders, in the folders listed
+in the `LMC_INCLUDE` environment variable, and in the project folder (the nearest folder above the
+source that holds a `.lmcproject` file). The IDE's Terminal tab sets `LMC_INCLUDE` to your project
+folder, so `lmcc` there finds imports the same way the IDE does.
 
 `python -m lmc` runs the same compiler. It reports every error it finds, not just the first.
 
@@ -96,43 +126,51 @@ Use a USB serial cable and a terminal program.
 
 ## Language
 
-One instruction per line. `;` or `//` starts a comment. Instruction names are not case
-sensitive, labels are. A label is `name:` and can sit on its own line or before an instruction.
-The program starts at the label `main`.
+The commands are those of Peter Higginson's LMC, plus `IMP`. One instruction per line. `;` or
+`//` starts a comment. Instruction names are not case sensitive, labels are. A label can have a
+colon or not, so `loop: LDA count`, `loop LDA count` and a `loop:` line on its own all work. The
+program starts at the label `main`.
 
-    HLT            stop
+    HLT or COB     stop
     LDA x          accumulator = x
-    STA x          x = accumulator
+    STA x or STO x x = accumulator
     ADD x          accumulator = accumulator + x
     SUB x          accumulator = accumulator - x
     BRA label      branch always
     BRZ label      branch if the accumulator is zero
     BRP label      branch if the accumulator is zero or positive
-    INP            read a decimal number from the UART into the accumulator
-    OUT [x]        print a number and a newline (the accumulator if no operand)
-    OTC [x]        print a character, or a whole CHA string (the accumulator's low byte if no operand)
+    INP            read a decimal number from the serial port into the accumulator
+    OUT            print the accumulator as a number, then a newline
+    OTC            print the accumulator as a character
+    DAT [value]    reserve a named memory location (default 0)
     IMP "file"     include another .lmc file once, relative to the importing file
 
-The accumulator is a 64 bit signed integer and arithmetic wraps.
+The accumulator is a 64 bit signed integer and arithmetic wraps. There are no mailboxes and no
+100 location limit. Your program and its named data sit in the Pi's memory as normal.
 
 An operand `x` can be:
 
-    42         slot 42, an 8 byte cell in the data area (like a classic LMC mailbox, no 100 cell limit)
-    name       a data label declared below
-    #5         an immediate value (decimal, 0x hex, or a character such as #'A'), not valid for STA
+    name       a named location, declared with DAT (or INT, CHA and so on, below)
+    0x200000   a real memory address, a multiple of 8. This is the address itself, not a mailbox number.
+    #5         an immediate value, the number itself (decimal, 0x hex, or a character such as #'A'), not valid for STA
 
-Data is declared with a type, either `name: INT 5` or the classic `name INT 5`:
+Addresses are checked: one that is not a multiple of 8 is an error, because the Pi faults on a
+misaligned 8 byte access while the MMU is off. If you wrote `ADD 5` meaning the number 5, the
+error suggests `ADD #5`.
 
-    DAT [v]    8 byte signed integer, default 0
-    INT [v]    4 byte signed integer
-    CHA [v]    1 byte, a number, a character, or a "string" (strings can be printed with OTC)
-    FLO [v]    4 byte float, stored only
-    DUB [v]    8 byte float, stored only
+Extras beyond Higginson's LMC:
 
-Data is always aligned to its own size, which the Pi needs while the MMU is off.
+    OUT x, OTC x   print a location or a CHA string directly, for example  OTC message
+    INT [v]        4 byte signed integer
+    CHA [v]        1 byte, a number, a character, or a "string"
+    FLO [v]        4 byte float, stored only
+    DUB [v]        8 byte float, stored only
 
-Names starting with `__` are used by the runtime. Imported files share one namespace, so a
-label can only be defined once across all files.
+`DAT` is 8 bytes. All data is aligned to its own size. Names starting with `__` are used by the
+runtime. Imported files share one namespace, so a label can only be defined once across all files.
+
+A program from Higginson's simulator runs as it is once its first instruction has the label
+`main`. See `higginson.lmc` in the examples.
 
 ## Memory map
 
